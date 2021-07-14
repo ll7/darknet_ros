@@ -162,7 +162,18 @@ void YoloObjectDetector::cameraCallback(const sensor_msgs::ImageConstPtr& msg) {
   cv_bridge::CvImagePtr cam_image;
 
   try {
-    cam_image = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
+    if (msg->encoding == "mono8" || msg->encoding == "bgr8" || msg->encoding == "rgb8") {
+      cam_image = cv_bridge::toCvCopy(msg, msg->encoding);
+    } else if ( msg->encoding == "bgra8") {
+      cam_image = cv_bridge::toCvCopy(msg, "bgr8");
+    } else if ( msg->encoding == "rgba8") {
+      cam_image = cv_bridge::toCvCopy(msg, "rgb8");
+    } else if ( msg->encoding == "mono16") {
+      ROS_WARN_ONCE("Converting mono16 images to mono8");
+      cam_image = cv_bridge::toCvCopy(msg, "mono8");
+    } else {
+      ROS_ERROR("Image message encoding provided is not mono8, mono16, bgr8, bgra8, rgb8 or rgba8.");
+    }
   } catch (cv_bridge::Exception& e) {
     ROS_ERROR("cv_bridge exception: %s", e.what());
     return;
@@ -368,9 +379,9 @@ void* YoloObjectDetector::detectInThread() {
 void* YoloObjectDetector::fetchInThread() {
   {
     boost::shared_lock<boost::shared_mutex> lock(mutexImageCallback_);
-    IplImageWithHeader_ imageAndHeader = getIplImageWithHeader();
-    IplImage* ROS_img = imageAndHeader.image;
-    ipl_into_image(ROS_img, buff_[buffIndex_]);
+    CvMatWithHeader_ imageAndHeader = getCvMatWithHeader();
+    free_image(buff_[buffIndex_]);
+    buff_[buffIndex_] = mat_to_image(imageAndHeader.image);
     headerBuff_[buffIndex_] = imageAndHeader.header;
     buffId_[buffIndex_] = actionId_;
   }
@@ -380,8 +391,7 @@ void* YoloObjectDetector::fetchInThread() {
 }
 
 void* YoloObjectDetector::displayInThread(void* ptr) {
-  show_image_cv(buff_[(buffIndex_ + 1) % 3], "YOLO V3", ipl_);
-  int c = cv::waitKey(waitKeyDelay_);
+  int c = show_image(buff_[(buffIndex_ + 1) % 3], "YOLO", 1);
   if (c != -1) c = c % 256;
   if (c == 27) {
     demoDone_ = 1;
@@ -424,7 +434,7 @@ void YoloObjectDetector::setupNetwork(char* cfgfile, char* weightfile, char* dat
   demoThresh_ = thresh;
   demoHier_ = hier;
   fullScreen_ = fullscreen;
-  printf("YOLO V3\n");
+  printf("YOLO\n");
   net_ = load_network(cfgfile, weightfile, 0);
   set_batch_network(net_, 1);
 }
@@ -457,9 +467,8 @@ void YoloObjectDetector::yolo() {
 
   {
     boost::shared_lock<boost::shared_mutex> lock(mutexImageCallback_);
-    IplImageWithHeader_ imageAndHeader = getIplImageWithHeader();
-    IplImage* ROS_img = imageAndHeader.image;
-    buff_[0] = ipl_to_image(ROS_img);
+    CvMatWithHeader_ imageAndHeader = getCvMatWithHeader();
+    buff_[0] = mat_to_image(imageAndHeader.image);
     headerBuff_[0] = imageAndHeader.header;
   }
   buff_[1] = copy_image(buff_[0]);
@@ -469,17 +478,16 @@ void YoloObjectDetector::yolo() {
   buffLetter_[0] = letterbox_image(buff_[0], net_->w, net_->h);
   buffLetter_[1] = letterbox_image(buff_[0], net_->w, net_->h);
   buffLetter_[2] = letterbox_image(buff_[0], net_->w, net_->h);
-  ipl_ = cvCreateImage(cvSize(buff_[0].w, buff_[0].h), IPL_DEPTH_8U, buff_[0].c);
+  disp_ = image_to_mat(buff_[0]);
 
   int count = 0;
-
   if (!demoPrefix_ && viewImage_) {
-    cv::namedWindow("YOLO V3", cv::WINDOW_NORMAL);
+    cv::namedWindow("YOLO", cv::WINDOW_NORMAL);
     if (fullScreen_) {
-      cv::setWindowProperty("YOLO V3", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
+      cv::setWindowProperty("YOLO", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
     } else {
-      cv::moveWindow("YOLO V3", 0, 0);
-      cv::resizeWindow("YOLO V3", 640, 480);
+      cv::moveWindow("YOLO", 0, 0);
+      cv::resizeWindow("YOLO", 640, 480);
     }
   }
 
@@ -495,7 +503,7 @@ void YoloObjectDetector::yolo() {
       if (viewImage_) {
         displayInThread(0);
       } else {
-        generate_image(buff_[(buffIndex_ + 1) % 3], ipl_);
+        generate_image(buff_[(buffIndex_ + 1) % 3], disp_);
       }
       publishInThread();
     } else {
@@ -512,9 +520,8 @@ void YoloObjectDetector::yolo() {
   }
 }
 
-IplImageWithHeader_ YoloObjectDetector::getIplImageWithHeader() {
-  IplImage* ROS_img = new IplImage(camImageCopy_);
-  IplImageWithHeader_ header = {.image = ROS_img, .header = imageHeader_};
+CvMatWithHeader_ YoloObjectDetector::getCvMatWithHeader() {
+  CvMatWithHeader_ header = {.image = camImageCopy_, .header = imageHeader_};
   return header;
 }
 
@@ -530,7 +537,7 @@ bool YoloObjectDetector::isNodeRunning(void) {
 
 void* YoloObjectDetector::publishInThread() {
   // Publish image.
-  cv::Mat cvImage = cv::cvarrToMat(ipl_);
+  cv::Mat cvImage = disp_;
   if (!publishDetectionImage(cv::Mat(cvImage))) {
     ROS_DEBUG("Detection image has not been broadcasted.");
   }
